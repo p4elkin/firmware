@@ -1,4 +1,5 @@
 #include <math.h>
+#include <stdlib.h>
 #include "key_action.h"
 #include "led_display.h"
 #include "layer.h"
@@ -8,7 +9,6 @@
 #include "slave_drivers/is31fl3731_driver.h"
 #include "slave_drivers/uhk_module_driver.h"
 #include "macros.h"
-#include "key_states.h"
 #include "right_key_matrix.h"
 #include "layer.h"
 #include "usb_report_updater.h"
@@ -22,10 +22,10 @@ static uint32_t mouseElapsedTime;
 
 uint16_t DoubleTapSwitchLayerTimeout = 300;
 static uint16_t DoubleTapSwitchLayerReleaseTimeout = 200;
+static const int SEC_ROLE_KICKIN_THRESHOLD = 250;
 
 static bool activeMouseStates[ACTIVE_MOUSE_STATES_COUNT];
 bool TestUsbStack = false;
-static key_action_t actionCache[SLOT_COUNT][MAX_KEY_COUNT_PER_MODULE];
 
 volatile uint8_t UsbReportUpdateSemaphore = 0;
 
@@ -237,29 +237,14 @@ static void handleSwitchLayerAction(key_state_t *keyState, key_action_t *action)
 static uint8_t basicScancodeIndex = 0;
 static uint8_t mediaScancodeIndex = 0;
 static uint8_t systemScancodeIndex = 0;
-static uint8_t stickyModifiers;
-static uint8_t secondaryRoleState = SecondaryRoleState_Released;
-static uint8_t secondaryRoleSlotId;
-static uint8_t secondaryRoleKeyId;
-static secondary_role_t secondaryRole;
 
 static void applyKeyAction(key_state_t *keyState, key_action_t *action)
 {
-    if (keyState->suppressed) {
-        return;
-    }
-
     handleSwitchLayerAction(keyState, action);
 
     switch (action->type) {
         case KeyActionType_Keystroke:
-            if (action->keystroke.scancode) {
-                if (!keyState->previous) {
-                    stickyModifiers = action->keystroke.modifiers;
-                }
-            } else {
-                ActiveUsbBasicKeyboardReport->modifiers |= action->keystroke.modifiers;
-            }
+            ActiveUsbBasicKeyboardReport->modifiers |= action->keystroke.modifiers;
             switch (action->keystroke.keystrokeType) {
                 case KeystrokeType_Basic:
                     if (basicScancodeIndex >= USB_BASIC_KEYBOARD_MAX_KEYS || action->keystroke.scancode == 0) {
@@ -282,28 +267,218 @@ static void applyKeyAction(key_state_t *keyState, key_action_t *action)
             }
             break;
         case KeyActionType_Mouse:
-            if (!keyState->previous) {
-                stickyModifiers = 0;
-            }
             activeMouseStates[action->mouseAction] = true;
             break;
         case KeyActionType_SwitchLayer:
             // Handled by handleSwitchLayerAction()
             break;
         case KeyActionType_SwitchKeymap:
-            if (!keyState->previous) {
-                stickyModifiers = 0;
-                secondaryRoleState = SecondaryRoleState_Released;
                 SwitchKeymapById(action->switchKeymap.keymapId);
-            }
             break;
         case KeyActionType_PlayMacro:
-            if (!keyState->previous) {
-                stickyModifiers = 0;
                 Macros_StartMacro(action->playMacro.macroId);
-            }
             break;
     }
+}
+
+static int IndexOf(pending_key_t *keys, key_ref_t *ref, uint8_t size) {
+    for (uint8_t i = 0; i < size; ++i) {
+        if (keys[i].keyRef.slotId == ref->slotId && keys[i].keyRef.keyId == ref->keyId) {
+            return (int) i;
+        }
+    }
+    return -1;
+}
+
+static void RemoveAt(pending_key_t *keys, uint8_t index, uint8_t size) {
+    for (int i = index; i < size - 1; ++i) {
+        keys[i] = keys[i + 1];
+    }
+}
+
+static void InsertAt(pending_key_t *keys, pending_key_t *newActiveKey, uint8_t index, uint8_t size) {
+    for (int i = size - 1; i > index; --i) {
+        keys[i] = keys[i - 1];
+    }
+    keys[index] = *newActiveKey;
+}
+
+static bool Remove(pending_key_t *keys, key_ref_t *record, uint8_t size) {
+    int index = IndexOf(keys, record, size);
+    if (index >= 0) {
+        RemoveAt(keys, (uint8_t) index, size);
+        return true;
+    }
+    return false;
+}
+
+static void mitigateBouncing(key_state_t *keyState) {
+    uint8_t debounceTimeOut = (keyState->previous ? DebounceTimePress : DebounceTimeRelease);
+    if (keyState->debouncing) {
+        if ((uint8_t)(CurrentTime - keyState->timestamp) > debounceTimeOut) {
+            keyState->debouncing = false;
+        } else {
+            keyState->current = keyState->previous;
+        }
+    } else if (keyState->previous != keyState->current) {
+        keyState->timestamp = CurrentTime;
+        keyState->debouncing = true;
+    }
+}
+
+static pending_key_t modifiers[10];
+static uint8_t modifierCount = 0;
+
+static pending_key_t actions[10];
+static uint8_t actionCount = 0;
+
+
+static uint8_t stateType = 0;
+static layer_id_t activeLayer = LayerId_Base;
+
+static key_action_t *resolveAction(key_ref_t *ref) {
+    return &CurrentKeymap[activeLayer][ref->slotId][ref->keyId];
+}
+
+static inline uint8_t secondaryRole(key_ref_t *ref) {
+    key_action_t *action = resolveAction(ref);
+    return action->type == KeyActionType_Keystroke ? action->keystroke.secondaryRole : 0;
+}
+
+static void AddAction(pending_key_t *newActiveKey) {
+    InsertAt(actions, newActiveKey, actionCount, actionCount);
+    ++actionCount;
+}
+
+static void AddModifier(pending_key_t *key) {
+    InsertAt(modifiers, key, modifierCount, modifierCount);
+    ++modifierCount;
+}
+
+static uint8_t applySecondaryRoleOf(key_ref_t *keyRef, uint8_t layer) {
+    uint8_t secRole = secondaryRole(keyRef);
+
+    bool isActionLayerSwitch = IS_SECONDARY_ROLE_LAYER_SWITCHER(secRole);
+    if (isActionLayerSwitch) {
+        return SECONDARY_ROLE_LAYER_TO_LAYER_ID(secRole);
+    } else if (IS_SECONDARY_ROLE_MODIFIER(secRole)) {
+        ActiveUsbBasicKeyboardReport->modifiers |= SECONDARY_ROLE_MODIFIER_TO_HID_MODIFIER(secRole);
+    }
+    return layer;
+}
+
+
+bool debug = false;
+static key_state_t test = {.previous = false, .current = false, .suppressed = false, .debouncing = false};
+static key_action_t testAction = {.type = KeyActionType_Keystroke, .keystroke = {.scancode = HID_KEYBOARD_SC_J, .keystrokeType = KeystrokeType_Basic}};
+static uint8_t codes[] = { HID_KEYBOARD_SC_0_AND_CLOSING_PARENTHESIS, HID_KEYBOARD_SC_1_AND_EXCLAMATION, HID_KEYBOARD_SC_2_AND_AT, HID_KEYBOARD_SC_3_AND_HASHMARK, HID_KEYBOARD_SC_4_AND_DOLLAR, HID_KEYBOARD_SC_5_AND_PERCENTAGE, HID_KEYBOARD_SC_6_AND_CARET, HID_KEYBOARD_SC_7_AND_AMPERSAND, HID_KEYBOARD_SC_8_AND_ASTERISK, HID_KEYBOARD_SC_9_AND_OPENING_PARENTHESIS};
+
+static void dbg(uint8_t keyCode) {
+    if (debug) {
+        usb_basic_keyboard_report_t customReport[2];
+
+        customReport->scancodes[0] = keyCode;
+        USB_DeviceHidSend(UsbCompositeDevice.basicKeyboardHandle, USB_BASIC_KEYBOARD_ENDPOINT_INDEX,  (uint8_t *)customReport, USB_BASIC_KEYBOARD_REPORT_LENGTH);
+    }
+}
+
+
+void sendKeyboardEvents() {
+    bool HasUsbBasicKeyboardReportChanged = memcmp(ActiveUsbBasicKeyboardReport, GetInactiveUsbBasicKeyboardReport(), sizeof(usb_basic_keyboard_report_t)) != 0;
+    bool HasUsbMediaKeyboardReportChanged = memcmp(ActiveUsbMediaKeyboardReport, GetInactiveUsbMediaKeyboardReport(), sizeof(usb_media_keyboard_report_t)) != 0;
+    bool HasUsbSystemKeyboardReportChanged = memcmp(ActiveUsbSystemKeyboardReport, GetInactiveUsbSystemKeyboardReport(), sizeof(usb_system_keyboard_report_t)) != 0;
+
+    if (HasUsbBasicKeyboardReportChanged) {
+        usb_status_t status = UsbBasicKeyboardAction();
+        if (status == kStatus_USB_Success) {
+            UsbReportUpdateSemaphore |= 1 << USB_BASIC_KEYBOARD_INTERFACE_INDEX;
+        }
+    }
+
+    if (HasUsbMediaKeyboardReportChanged) {
+        usb_status_t status = UsbMediaKeyboardAction();
+        if (status == kStatus_USB_Success) {
+            UsbReportUpdateSemaphore |= 1 << USB_MEDIA_KEYBOARD_INTERFACE_INDEX;
+        }
+    }
+
+    if (HasUsbSystemKeyboardReportChanged) {
+        usb_status_t status = UsbSystemKeyboardAction();
+        if (status == kStatus_USB_Success) {
+            UsbReportUpdateSemaphore |= 1 << USB_SYSTEM_KEYBOARD_INTERFACE_INDEX;
+        }
+    }
+}
+
+void resetKeyboardReports() {
+    ResetActiveUsbBasicKeyboardReport();
+    ResetActiveUsbMediaKeyboardReport();
+    ResetActiveUsbSystemKeyboardReport();
+}
+
+uint32_t releasedActionKeyEnqueueTime  = 0;
+
+bool execModifierActions() {
+    int count = 0;
+
+    for (uint8_t i = 0; i < actionCount; ++i) {
+        pending_key_t *actionKey = &actions[i];
+        key_action_t *action = resolveAction(&actionKey->keyRef);
+        if (actionKey->keyRef.state->current && action->type == KeyActionType_Keystroke && !action->keystroke.scancode) {
+            ActiveUsbBasicKeyboardReport->modifiers |= action->keystroke.modifiers;
+            count++;
+        }
+    }
+
+    return count > 0;
+}
+
+static void execAllActions(bool sendImmediateFirst) {
+
+    if (sendImmediateFirst) {
+        // TODO - pay additional attention to this and maybe try to streamline the functionality
+        if (sendImmediateFirst) {
+            // only exists to ensure that mere ctrls and alts are emitted together with released enqueued modifiers
+            // like e.g. to type 'A' of 'S'
+            if (execModifierActions()) {
+                sendKeyboardEvents();
+                resetKeyboardReports();
+            }
+        }
+    }
+
+    for (uint8_t i = 0; i < actionCount; ) {
+        pending_key_t* actionKey = &actions[i];
+
+        key_state_t *state = actionKey->keyRef.state;
+        if (state->current || state->suppressed) {
+            applyKeyAction(state, resolveAction(&actionKey->keyRef));
+        }
+
+        if (!state->current || state->suppressed) {
+            actionKey->keyRef.state->suppressed = false;
+            Remove(actions, &actionKey->keyRef, actionCount--);
+        } else {
+            ++i;
+        }
+    }
+}
+
+
+bool applyImmediate = false;
+void applyImmediately(pending_key_t *key) {
+//    for (uint8_t i = 0; i < key->relatedModifierCount; ++i) {
+//        key->relatedModifierRefs[i];
+//    }
+
+    applyKeyAction(key->keyRef.state, resolveAction(&key->keyRef));
+    applyImmediate = true;
+    releasedActionKeyEnqueueTime = key->enqueueTime;
+}
+
+
+bool secondaryRoleTimeoutElapsed(pending_key_t *modifier) {
+    return (CurrentTime - modifier->enqueueTime) > SEC_ROLE_KICKIN_THRESHOLD;
 }
 
 static void updateActiveUsbReports(void)
@@ -317,99 +492,52 @@ static void updateActiveUsbReports(void)
         return;
     }
 
+    activeLayer = GetActiveLayer();
+
     memset(activeMouseStates, 0, ACTIVE_MOUSE_STATES_COUNT);
 
     basicScancodeIndex = 0;
     mediaScancodeIndex = 0;
     systemScancodeIndex = 0;
 
-    layer_id_t activeLayer = LayerId_Base;
-    if (secondaryRoleState == SecondaryRoleState_Triggered && IS_SECONDARY_ROLE_LAYER_SWITCHER(secondaryRole)) {
-        activeLayer = SECONDARY_ROLE_LAYER_TO_LAYER_ID(secondaryRole);
-    }
-    if (activeLayer == LayerId_Base) {
-        activeLayer = GetActiveLayer();
-    }
-    bool layerChanged = previousLayer != activeLayer;
-    if (layerChanged) {
-        stickyModifiers = 0;
-    }
-    LedDisplay_SetLayer(activeLayer);
+    applyImmediate = false;
 
-    if (TestUsbStack) {
-        static bool simulateKeypresses, isEven, isEvenMedia;
-        static uint32_t mediaCounter = 0;
-        key_state_t *testKeyState = &KeyStates[SlotId_LeftKeyboardHalf][0];
-
-        if (activeLayer == LayerId_Fn && testKeyState->current && !testKeyState->previous) {
-            simulateKeypresses = !simulateKeypresses;
-        }
-        if (simulateKeypresses) {
-            isEven = !isEven;
-            ActiveUsbBasicKeyboardReport->scancodes[basicScancodeIndex++] = isEven ? HID_KEYBOARD_SC_A : HID_KEYBOARD_SC_BACKSPACE;
-            if (++mediaCounter % 200 == 0) {
-                isEvenMedia = !isEvenMedia;
-                ActiveUsbMediaKeyboardReport->scancodes[mediaScancodeIndex++] = isEvenMedia ? MEDIA_VOLUME_DOWN : MEDIA_VOLUME_UP;
-            }
-            MouseMoveState.xOut = isEven ? -5 : 5;
-        }
-    }
-
-    for (uint8_t slotId=0; slotId<SLOT_COUNT; slotId++) {
-        for (uint8_t keyId=0; keyId<MAX_KEY_COUNT_PER_MODULE; keyId++) {
+    for (uint8_t slotId = 0; slotId < SLOT_COUNT; slotId++) {
+        for (uint8_t keyId = 0; keyId < MAX_KEY_COUNT_PER_MODULE; keyId++) {
             key_state_t *keyState = &KeyStates[slotId][keyId];
-            key_action_t *action;
 
-            if (keyState->debouncing) {
-                if ((uint8_t)(CurrentTime - keyState->timestamp) > (keyState->previous ? DebounceTimePress : DebounceTimeRelease)) {
-                    keyState->debouncing = false;
-                } else {
-                    keyState->current = keyState->previous;
-                }
-            } else if (keyState->previous != keyState->current) {
-                keyState->timestamp = CurrentTime;
-                keyState->debouncing = true;
-            }
+            mitigateBouncing(keyState);
 
             if (keyState->current && !keyState->previous) {
                 if (SleepModeActive) {
                     WakeUpHost();
                 }
-                if (secondaryRoleState == SecondaryRoleState_Pressed) {
-                    // Trigger secondary role.
-                    secondaryRoleState = SecondaryRoleState_Triggered;
-                    keyState->current = false;
-                } else {
-                    actionCache[slotId][keyId] = CurrentKeymap[activeLayer][slotId][keyId];
-                }
             }
 
-            action = &actionCache[slotId][keyId];
-
             if (keyState->current) {
-                if (action->type == KeyActionType_Keystroke && action->keystroke.secondaryRole) {
-                    // Press released secondary role key.
-                    if (!keyState->previous && secondaryRoleState == SecondaryRoleState_Released) {
-                        secondaryRoleState = SecondaryRoleState_Pressed;
-                        secondaryRoleSlotId = slotId;
-                        secondaryRoleKeyId = keyId;
-                        secondaryRole = action->keystroke.secondaryRole;
-                        keyState->suppressed = true;
-                    }
-                } else {
-                    applyKeyAction(keyState, action);
-                }
-            } else {
-                keyState->suppressed = false;
+                key_ref_t ref = {
+                        .keyId = keyId,
+                        .slotId = slotId,
+                        .state = keyState
+                };
 
-                // Release secondary role key.
-                if (keyState->previous && secondaryRoleSlotId == slotId && secondaryRoleKeyId == keyId) {
-                    // Trigger primary role.
-                    if (secondaryRoleState == SecondaryRoleState_Pressed) {
-                        keyState->previous = false;
-                        applyKeyAction(keyState, action);
+                pending_key_t key = {
+                        .activated = false,
+                        .enqueueTime = CurrentTime,
+                        .keyRef = ref
+                };
+
+                bool hasSecondaryRole = secondaryRole(&ref);
+                bool notRegisteredAsModifier = IndexOf(modifiers, &ref, modifierCount) < 0;
+                bool notRegisteredAsAction = IndexOf(actions, &ref, actionCount) < 0;
+
+                // distribute previously untracked keys between action and modifier queue
+                if (notRegisteredAsAction && notRegisteredAsModifier) {
+                    if (hasSecondaryRole) {
+                        AddModifier(&key);
+                    } else {
+                        AddAction(&key);
                     }
-                    secondaryRoleState = SecondaryRoleState_Released;
                 }
             }
 
@@ -417,16 +545,155 @@ static void updateActiveUsbReports(void)
         }
     }
 
-    processMouseActions();
-
-    // When a layer switcher key gets pressed along with another key that produces some modifiers
-    // and the accomanying key gets released then keep the related modifiers active a long as the
-    // layer switcher key stays pressed.  Useful for Alt+Tab keymappings and the like.
-    ActiveUsbBasicKeyboardReport->modifiers |= stickyModifiers;
-
-    if (secondaryRoleState == SecondaryRoleState_Triggered && IS_SECONDARY_ROLE_MODIFIER(secondaryRole)) {
-        ActiveUsbBasicKeyboardReport->modifiers |= SECONDARY_ROLE_MODIFIER_TO_HID_MODIFIER(secondaryRole);
+    // detect the longest held key, might affect the further algorithm
+    pending_key_t *longestPressedKey = NULL;
+    for (uint8_t i = 0; i < modifierCount; ++i) {
+        if (!longestPressedKey || longestPressedKey->enqueueTime > modifiers[i].enqueueTime) {
+            longestPressedKey = &modifiers[i];
+        }
     }
+
+    for (uint8_t i = 0; i < actionCount; ++i) {
+        if (!longestPressedKey || longestPressedKey->enqueueTime > actions[i].enqueueTime) {
+            key_action_t *action = resolveAction(&actions[i].keyRef);
+            if (action->type == KeyActionType_Keystroke && action->keystroke.scancode) {
+                longestPressedKey = &actions[i];
+            }
+        }
+    }
+
+//    for (uint8_t i = 0; i < actionCount; ++i) {
+//        pending_key_t action = actions[i];
+//        key_action_t *keyAction = resolveAction(&action.keyRef);
+//        if (!keyAction->keystroke.scancode) {
+//            for (uint8_t j = 0; j < actionCount; ++j) {
+//                pending_key_t *nonModifierAction = &actions[j];
+//                key_action_t *keyStroke = resolveAction(&action.keyRef);
+//                if (keyStroke->keystroke.scancode) {
+//                    nonModifierAction->relatedModifierRefs[nonModifierAction->relatedModifierCount++ % 4] = action.keyRef;
+//                }
+//            }
+//
+//            for (uint8_t j = 0; j < modifierCount; ++j) {
+//                pending_key_t *nonModifierAction = &modifiers[j];
+//                key_action_t *keyStroke = resolveAction(&action.keyRef);
+//                if (keyStroke->keystroke.scancode) {
+//                    nonModifierAction->relatedModifierRefs[nonModifierAction->relatedModifierCount++ % 4] = action.keyRef;
+//                }
+//            }
+//        }
+//    }
+
+    // free mode - none of the modifiers is pressed yet, merely wait for them and push through all the
+    // actions in the meantime
+    if (stateType == 0) {
+        bool mayStartListeningToSecondaryRoleActivation = false;
+        if (longestPressedKey) {
+            mayStartListeningToSecondaryRoleActivation = secondaryRole(&longestPressedKey->keyRef);
+        }
+        if (modifierCount > 0 && mayStartListeningToSecondaryRoleActivation) {
+            dbg(HID_KEYBOARD_SC_Q);
+            stateType = 1;
+        } else {
+            for (uint8_t i = 0; i < modifierCount; ++i) {
+                AddAction(&modifiers[i]);
+            }
+            modifierCount = 0;
+            execAllActions(false);
+        }
+    }
+
+    // await mode - a modifier key is held and we buffer the action keys to see if any of them will be released
+    // before the modifier key is released.
+    if (stateType == 1) {
+        // push all released modifiers as actions
+        for (int i = modifierCount - 1; i >= 0; --i) {
+            pending_key_t *pendingModifier = &modifiers[i];
+            key_state_t *state = pendingModifier->keyRef.state;
+            if (!state->current) {
+                if (!secondaryRoleTimeoutElapsed(pendingModifier)) {
+                    applyImmediately(pendingModifier);
+                }
+                RemoveAt(modifiers, (uint8_t) i, modifierCount--);
+            }
+        }
+
+        bool mayTriggerSecRoleMode = modifierCount > 0 && applyImmediate;
+        if (modifierCount > 0 && !mayTriggerSecRoleMode) {
+            // see if any action is released (even the modifier would do)
+            for (uint8_t i = 0; i < actionCount; ++i) {
+                if (!actions[i].keyRef.state->current) {
+                    mayTriggerSecRoleMode = true;
+                }
+            }
+        }
+
+        // detect if any modifier becomes active
+        bool activeModifierDetected = false;
+        for (uint8_t i = 0; i < modifierCount; ++i) {
+            bool timeoutElapsed = secondaryRoleTimeoutElapsed(&modifiers[i]);
+            if (modifiers[i].keyRef.state->current) {
+                if (timeoutElapsed || mayTriggerSecRoleMode) {
+                    activeModifierDetected = true;
+                    break;
+                }
+            }
+        }
+
+        if (activeModifierDetected) {
+            dbg(HID_KEYBOARD_SC_P);
+            // turn all released pending actions on
+            stateType = 2;
+        } else if (modifierCount == 0) {
+            dbg(HID_KEYBOARD_SC_R);
+            execAllActions(applyImmediate);
+            stateType = 0;
+        }
+    }
+
+    // secondary role mode - execute all the actions write-through, track held sec role keys, bail out as soon as
+    // there is none
+    if (stateType == 2) {
+        for (int i = actionCount - 1; i >= 0; --i) {
+            pending_key_t *key = &actions[i];
+            if (!key->keyRef.state->current) {
+                applyImmediately(key);
+                RemoveAt(actions, (uint8_t) i, actionCount--);
+            }
+        }
+
+        bool activeModifierDetected = false;
+
+        for (int i = modifierCount - 1; i >= 0; --i) {
+            pending_key_t *pendingModifier = &modifiers[i];
+            bool timeoutElapsed = secondaryRoleTimeoutElapsed(pendingModifier);
+            if (!pendingModifier->keyRef.state->current) {
+                if (!timeoutElapsed && !pendingModifier->activated) {
+                    applyImmediately(pendingModifier);
+                }
+                Remove(modifiers, &pendingModifier->keyRef, modifierCount--);
+            } else {
+                if (pendingModifier->activated || (timeoutElapsed || pendingModifier->enqueueTime < releasedActionKeyEnqueueTime)){
+                    activeLayer = applySecondaryRoleOf(&pendingModifier->keyRef, activeLayer);
+                    pendingModifier->activated = true;
+                    activeModifierDetected = true;
+                }
+            }
+        }
+        // apply all the pending actions, at this moment none of the actions should be in released state, so remove those
+        // before executing the actions - sort them based on enqueue time(?)
+        if (!activeModifierDetected) {
+            stateType = actionCount > 0 ? 1 : 0;
+//            dbg(codes[stateType]);
+        }
+
+        execAllActions(applyImmediate);
+    }
+
+
+    LedDisplay_SetLayer(activeLayer);
+
+    processMouseActions();
 
     previousLayer = activeLayer;
 }
@@ -452,42 +719,18 @@ void UpdateUsbReports(void)
     lastUpdateTime = CurrentTime;
     UsbReportUpdateCounter++;
 
-    ResetActiveUsbBasicKeyboardReport();
-    ResetActiveUsbMediaKeyboardReport();
-    ResetActiveUsbSystemKeyboardReport();
+    resetKeyboardReports();
     ResetActiveUsbMouseReport();
 
     updateActiveUsbReports();
 
-    bool HasUsbBasicKeyboardReportChanged = memcmp(ActiveUsbBasicKeyboardReport, GetInactiveUsbBasicKeyboardReport(), sizeof(usb_basic_keyboard_report_t)) != 0;
-    bool HasUsbMediaKeyboardReportChanged = memcmp(ActiveUsbMediaKeyboardReport, GetInactiveUsbMediaKeyboardReport(), sizeof(usb_media_keyboard_report_t)) != 0;
-    bool HasUsbSystemKeyboardReportChanged = memcmp(ActiveUsbSystemKeyboardReport, GetInactiveUsbSystemKeyboardReport(), sizeof(usb_system_keyboard_report_t)) != 0;
     bool HasUsbMouseReportChanged = memcmp(ActiveUsbMouseReport, GetInactiveUsbMouseReport(), sizeof(usb_mouse_report_t)) != 0;
 
-    if (HasUsbBasicKeyboardReportChanged) {
-        usb_status_t status = UsbBasicKeyboardAction();
-        if (status == kStatus_USB_Success) {
-            UsbReportUpdateSemaphore |= 1 << USB_BASIC_KEYBOARD_INTERFACE_INDEX;
-        }
-    }
-
-    if (HasUsbMediaKeyboardReportChanged) {
-        usb_status_t status = UsbMediaKeyboardAction();
-        if (status == kStatus_USB_Success) {
-            UsbReportUpdateSemaphore |= 1 << USB_MEDIA_KEYBOARD_INTERFACE_INDEX;
-        }
-    }
-
-    if (HasUsbSystemKeyboardReportChanged) {
-        usb_status_t status = UsbSystemKeyboardAction();
-        if (status == kStatus_USB_Success) {
-            UsbReportUpdateSemaphore |= 1 << USB_SYSTEM_KEYBOARD_INTERFACE_INDEX;
-        }
-    }
+    sendKeyboardEvents();
 
     // Send out the mouse position and wheel values continuously if the report is not zeros, but only send the mouse button states when they change.
     if (HasUsbMouseReportChanged || ActiveUsbMouseReport->x || ActiveUsbMouseReport->y ||
-            ActiveUsbMouseReport->wheelX || ActiveUsbMouseReport->wheelY) {
+        ActiveUsbMouseReport->wheelX || ActiveUsbMouseReport->wheelY) {
         usb_status_t status = UsbMouseAction();
         if (status == kStatus_USB_Success) {
             UsbReportUpdateSemaphore |= 1 << USB_MOUSE_INTERFACE_INDEX;

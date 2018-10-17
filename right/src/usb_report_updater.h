@@ -4,6 +4,8 @@
 // Includes:
 
     #include "config_parser/parse_keymap.h"
+    #include "key_states.h"
+    #include "key_action.h"
 
 // Macros:
 
@@ -38,6 +40,28 @@
         SecondaryRole_Mouse
     } secondary_role_t;
 
+    typedef struct {
+        uint8_t keyId;
+        uint8_t slotId;
+        key_state_t *state;
+    } key_ref_t;
+
+    typedef struct {
+        // timestamp of the enqueueing the key press (when it started to wait which role to emit)
+        uint32_t enqueueTime;
+        // related key info ref
+        key_ref_t keyRef;
+        // indicates whether a modifier key was activated either as a result of timeout
+        // or as a result of accompanying action key press. This flag set to true means that the primary role of the
+        // key should never be emitted anymore.
+        bool activated;
+        // modifier refs that were pressed at some point while
+        // a key that might be involved into a sec role thing is pressed (be that a modifier or an action).
+        key_ref_t relatedModifierRefs[4];
+        // count of such actions
+        uint8_t relatedModifierCount;
+    } pending_key_t;
+
     typedef enum {
         MouseSpeed_Normal,
         MouseSpeed_Accelerated,
@@ -68,7 +92,7 @@
 
 // Variables:
 
-    extern uint16_t DoubleTapSwitchLayerTimeout;
+extern uint16_t DoubleTapSwitchLayerTimeout;
     extern mouse_kinetic_state_t MouseMoveState;
     extern mouse_kinetic_state_t MouseScrollState;
     extern uint32_t UsbReportUpdateCounter;
