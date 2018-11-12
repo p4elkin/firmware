@@ -360,8 +360,9 @@ static bool execModifierActions() {
 static void executeActions() {
     if (State.scheduledForImmediateExecutionAmount > 0) {
         for (int i = State.scheduledForImmediateExecutionAmount - 1; i >= 0; --i) {
-            pending_key_t key = State.scheduledForImmediateExecution[i]; ;
-            applyKeyAction(key.keyRef.state, resolveAction(&key.keyRef));
+            pending_key_t *key = &State.scheduledForImmediateExecution[i]; ;
+            applyKeyAction(key->keyRef.state, resolveAction(&key->keyRef));
+            key->activated = true;
         }
 
         // easier to understand on the example:
@@ -370,14 +371,14 @@ static void executeActions() {
         // they were held together, so shift should've been accounted when the other key
         // was released. Here we prepend the modifier states from less than 100ms ago to the
         // immediately executed actions (the ones that are executed as a result of key release).
-        if (CurrentTime - State.lastModifierReportUpdate < 100) {
+        if (CurrentTime - State.lastModifierReportUpdate < 200) {
             addModifiersToReport(State.lastUpdatedModifierFlags);
         }
 
         // like e.g. to type 'A' of 'S'
         execModifierActions();
         sendKeyboardEvents();
-//        resetKeyboardReports();
+        resetKeyboardReports();
     }
 
     for (int i = State.actionCount - 1; i >= 0; --i) {
@@ -386,6 +387,7 @@ static void executeActions() {
         key_state_t *keyState = actionKey->keyRef.state;
         if (keyState->current || keyState->suppressed) {
             applyKeyAction(keyState, resolveAction(&actionKey->keyRef));
+            actionKey->activated = true;
         }
 
         if (!keyState->current || keyState->suppressed) {
@@ -484,7 +486,7 @@ void handleActiveSecondaryRoleState() {
     // should this be done in the previous stage?
     for (uint8_t i = 0; i < State.actionCount; ++i) {
         pending_key_t *key = action(i);
-        if (!key->keyRef.state->current) {
+        if (!key->keyRef.state->current && !key->activated) {
             scheduleForImmediateExecution(key);
         }
     }
