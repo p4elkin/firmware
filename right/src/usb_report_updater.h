@@ -8,13 +8,26 @@
     #include "key_action.h"
 
 // Macros:
+#define IS_SECONDARY_ROLE_MODIFIER(secondaryRole) (SecondaryRole_LeftCtrl <= (secondaryRole) && (secondaryRole) <= SecondaryRole_RightSuper)
+#define IS_SECONDARY_ROLE_LAYER_SWITCHER(secondaryRole) (SecondaryRole_Mod <= (secondaryRole) && (secondaryRole) <= SecondaryRole_Mouse)
+#define SECONDARY_ROLE_MODIFIER_TO_HID_MODIFIER(secondaryRoleModifier) (1 << ((secondaryRoleModifier) - 1))
+#define SECONDARY_ROLE_LAYER_TO_LAYER_ID(secondaryRoleLayer) ((secondaryRoleLayer) - SecondaryRole_RightSuper)
 
+
+typedef enum {
+    SecondaryRole_LeftCtrl = 1,
+    SecondaryRole_LeftShift,
+    SecondaryRole_LeftAlt,
+    SecondaryRole_LeftSuper,
+    SecondaryRole_RightCtrl,
+    SecondaryRole_RightShift,
+    SecondaryRole_RightAlt,
+    SecondaryRole_RightSuper,
+    SecondaryRole_Mod,
+    SecondaryRole_Fn,
+    SecondaryRole_Mouse
+} secondary_role_t;
     #define ACTIVE_MOUSE_STATES_COUNT (SerializedMouseAction_Last + 1)
-
-    #define IS_SECONDARY_ROLE_MODIFIER(secondaryRole) (SecondaryRole_LeftCtrl <= (secondaryRole) && (secondaryRole) <= SecondaryRole_RightSuper)
-    #define IS_SECONDARY_ROLE_LAYER_SWITCHER(secondaryRole) (SecondaryRole_Mod <= (secondaryRole) && (secondaryRole) <= SecondaryRole_Mouse)
-    #define SECONDARY_ROLE_MODIFIER_TO_HID_MODIFIER(secondaryRoleModifier) (1 << ((secondaryRoleModifier) - 1))
-    #define SECONDARY_ROLE_LAYER_TO_LAYER_ID(secondaryRoleLayer) ((secondaryRoleLayer) - SecondaryRole_RightSuper)
 
     #define USB_SEMAPHORE_TIMEOUT 100 // ms
 
@@ -25,42 +38,6 @@
         SecondaryRoleState_Pressed,
         SecondaryRoleState_Triggered,
     } secondary_role_state_t;
-
-    typedef enum {
-        SecondaryRole_LeftCtrl = 1,
-        SecondaryRole_LeftShift,
-        SecondaryRole_LeftAlt,
-        SecondaryRole_LeftSuper,
-        SecondaryRole_RightCtrl,
-        SecondaryRole_RightShift,
-        SecondaryRole_RightAlt,
-        SecondaryRole_RightSuper,
-        SecondaryRole_Mod,
-        SecondaryRole_Fn,
-        SecondaryRole_Mouse
-    } secondary_role_t;
-
-    typedef struct {
-        uint8_t keyId;
-        uint8_t slotId;
-        key_state_t *state;
-    } key_ref_t;
-
-    typedef struct {
-        // timestamp of the enqueueing the key press (when it started to wait which role to emit)
-        uint32_t enqueueTime;
-        // related key info ref
-        key_ref_t keyRef;
-        // indicates whether a modifier key was activated either as a result of timeout
-        // or as a result of accompanying action key press. This flag set to true means that the primary role of the
-        // key should never be emitted anymore.
-        bool activated;
-        // modifier refs that were pressed at some point while
-        // a key that might be involved into a sec role thing is pressed (be that a modifier or an action).
-        key_ref_t relatedModifierRefs[4];
-        // count of such actions
-        uint8_t relatedModifierCount;
-    } pending_key_t;
 
     typedef enum {
         MouseSpeed_Normal,
