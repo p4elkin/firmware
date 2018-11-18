@@ -379,18 +379,18 @@ static void executeActions() {
         execModifierActions();
         sendKeyboardEvents();
         resetKeyboardReports();
+
+//        Timer_Delay(10);
     }
 
     for (int i = State.actionCount - 1; i >= 0; --i) {
         pending_key_t* actionKey = action(i);
 
         key_state_t *keyState = actionKey->keyRef.state;
-        if (keyState->current || keyState->suppressed) {
-            applyKeyAction(keyState, resolveAction(&actionKey->keyRef));
-            actionKey->activated = true;
-        }
+        applyKeyAction(keyState, resolveAction(&actionKey->keyRef));
+        actionKey->activated = true;
 
-        if (!keyState->current || keyState->suppressed) {
+        if (!keyState->current) {
             actionKey->keyRef.state->suppressed = false;
             untrackActionAt(i);
         }
@@ -470,7 +470,6 @@ void handleSecondaryRoleReleaseAwaitState() {
 
     // if can activate sec role mode - do it
     if (activatedModifierDetected) {
-        sendDebugChar(HID_KEYBOARD_SC_P);
         // turn all released pending actions on
         switchToState(2);
         // if there are no modifiers pending anymore - return to simple mode
