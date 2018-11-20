@@ -104,11 +104,14 @@ void updateActiveKey(key_state_t *keyState, uint8_t slotId, uint8_t keyId) {
 }
 
 void scheduleForImmediateExecution(pending_key_t *key) {
-    State.scheduledForImmediateExecution[State.scheduledForImmediateExecutionAmount++ % 5] = *key;
+    int index = State.scheduledForImmediateExecutionAmount++ % 5;
+    State.scheduledForImmediateExecution[index] = *key;
     State.releasedActionKeyEnqueueTime = key->enqueueTime;
 
     if (!key->keyRef.state->current) {
-//        key->keyRef.state->timestamp = CurrentTime;
-//        key->keyRef.state->debouncing = true;
+        pending_key_t immediateKey = State.scheduledForImmediateExecution[index];
+        immediateKey.keyRef.state->previous = false;
+        immediateKey.keyRef.state->timestamp = CurrentTime;
+        immediateKey.keyRef.state->debouncing = true;
     }
 }

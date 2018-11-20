@@ -379,19 +379,17 @@ static void executeActions() {
         execModifierActions();
         sendKeyboardEvents();
         resetKeyboardReports();
-
-//        Timer_Delay(10);
     }
 
     for (int i = State.actionCount - 1; i >= 0; --i) {
         pending_key_t* actionKey = action(i);
 
         key_state_t *keyState = actionKey->keyRef.state;
+
         applyKeyAction(keyState, resolveAction(&actionKey->keyRef));
         actionKey->activated = true;
 
         if (!keyState->current) {
-            actionKey->keyRef.state->suppressed = false;
             untrackActionAt(i);
         }
     }
@@ -404,20 +402,28 @@ static bool secondaryRoleTimeoutElapsed(pending_key_t *modifier) {
 void handleFreeTypeState() {
     bool mayStartListeningToSecondaryRoleActivation = false;
     if (State.longestPressedKey != NULL) {
-        mayStartListeningToSecondaryRoleActivation = State.modifierCount > 0 && secondaryRole(&State.longestPressedKey->keyRef);
+        mayStartListeningToSecondaryRoleActivation =
+                State.modifierCount > 0 &&
+                secondaryRole(&State.longestPressedKey->keyRef) &&
+                !State.longestPressedKey->activated;
     }
     if (mayStartListeningToSecondaryRoleActivation) {
+        sendDebugChar( HID_KEYBOARD_SC_P);
         switchToState(1);
     } else {
-        for (uint8_t i = 0; i < State.modifierCount; ++i) {
-            if (modifier(i)->keyRef.state->current) {
+        for (int i = State.modifierCount - 1; i >= 0 ; --i) {
+            bool isAlreadyTrackedAsAction = IndexOf(State.actions, &modifier(i)->keyRef, State.actionCount) >= 0;
+            if (modifier(i)->keyRef.state->current &&
+                !isAlreadyTrackedAsAction) {
+                untrackModifier(i);
                 addAction(modifier(i));
             }
         }
-        State.modifierCount = 0;
         executeActions();
     }
 }
+
+int count = 0;
 
 void handleSecondaryRoleReleaseAwaitState() {
     // apply all the released modifiers right away
@@ -430,12 +436,18 @@ void handleSecondaryRoleReleaseAwaitState() {
         pending_key_t *pendingModifier = modifier(i);
         key_state_t *keyState = pendingModifier->keyRef.state;
         if (!keyState->current) {
+
+
             if (State.modifierCount > 1) {
                 // FIXME - this a workaround which is considered in the state == 2, doing this is roughly equivalent to pushing the mod into the action array
+                sendDebugChar( HID_KEYBOARD_SC_G);
                 State.releasedActionKeyEnqueueTime = pendingModifier->enqueueTime;
                 shouldTriggerSecondaryRoleActivationMode = true;
             } else {
                 if (!secondaryRoleTimeoutElapsed(pendingModifier)) {
+                    if (count++ > 10) {
+                        sendDebugChar( HID_KEYBOARD_SC_Y);
+                    }
                     scheduleForImmediateExecution(pendingModifier);
                 }
                 untrackModifier(i);
@@ -501,7 +513,7 @@ void handleActiveSecondaryRoleState() {
         // if either the modifier has been already activated
         if (pendingModifier->activated ||
             // or it is ready to be activated - timeout elapsed and the modifier was released before the action key
-            (timeoutElapsed || pendingModifier->enqueueTime < State.releasedActionKeyEnqueueTime)){
+            (timeoutElapsed || pendingModifier->enqueueTime < State.releasedActionKeyEnqueueTime)) {
             // if that is the case - apply the modifier right away
 
             uint8_t secRole = secondaryRole(&pendingModifier->keyRef);
@@ -522,7 +534,8 @@ void handleActiveSecondaryRoleState() {
         pending_key_t *pendingModifier = modifier(i);
         bool timeoutElapsed = secondaryRoleTimeoutElapsed(pendingModifier);
         if (!pendingModifier->keyRef.state->current) {
-            if (!timeoutElapsed && !pendingModifier->activated) {
+            if (!timeoutElapsed
+                && !pendingModifier->activated) {
                 scheduleForImmediateExecution(pendingModifier);
             }
             untrackModifier(i);
