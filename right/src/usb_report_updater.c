@@ -64,6 +64,8 @@ static void applyKeyAction(key_state_t *keyState, key_action_t *action);
 
 void addModifiersToReport(int flags);
 
+void suppressHeldKeystrokes();
+
 static void processMouseKineticState(mouse_kinetic_state_t *kineticState)
 {
     float initialSpeed = kineticState->intMultiplier * kineticState->initialSpeed;
@@ -381,13 +383,21 @@ static void executeActions() {
         resetKeyboardReports();
     }
 
+    // apply all the pending actions, at this moment none of the actions should be in released state, so remove those
+    // before executing the actions - sort them based on enqueue time(?)
+    if (previousLayer != State.activeLayer) {
+        suppressHeldKeystrokes();
+    }
+
     for (int i = State.actionCount - 1; i >= 0; --i) {
         pending_key_t* actionKey = action(i);
 
         key_state_t *keyState = actionKey->keyRef.state;
 
-        applyKeyAction(keyState, resolveAction(&actionKey->keyRef));
-        actionKey->activated = true;
+        if (!keyState->suppressed) {
+            applyKeyAction(keyState, resolveAction(&actionKey->keyRef));
+            actionKey->activated = true;
+        }
 
         if (!keyState->current) {
             untrackActionAt(i);
@@ -423,21 +433,13 @@ void handleFreeTypeState() {
     }
 }
 
-int count = 0;
-
 void handleSecondaryRoleReleaseAwaitState() {
-    // apply all the released modifiers right away
-    //
-    // issues:
-    // - if there are normal modifiers released recently - they should be also applied (they were on while the tracked
-    //   keys were kept pressed;
+    //  handle released modifiers: either trigger threir execution right away or discard them completely
     bool shouldTriggerSecondaryRoleActivationMode = false;
     for (int i = State.modifierCount - 1; i >= 0; --i) {
         pending_key_t *pendingModifier = modifier(i);
         key_state_t *keyState = pendingModifier->keyRef.state;
         if (!keyState->current) {
-
-
             if (State.modifierCount > 1) {
                 // FIXME - this a workaround which is considered in the state == 2, doing this is roughly equivalent to pushing the mod into the action array
                 sendDebugChar( HID_KEYBOARD_SC_G);
@@ -445,9 +447,7 @@ void handleSecondaryRoleReleaseAwaitState() {
                 shouldTriggerSecondaryRoleActivationMode = true;
             } else {
                 if (!secondaryRoleTimeoutElapsed(pendingModifier)) {
-                    if (count++ > 10) {
-                        sendDebugChar( HID_KEYBOARD_SC_Y);
-                    }
+                    sendDebugChar( HID_KEYBOARD_SC_Y);
                     scheduleForImmediateExecution(pendingModifier);
                 }
                 untrackModifier(i);
@@ -459,6 +459,19 @@ void handleSecondaryRoleReleaseAwaitState() {
     // also see if any action is released (even the modifier would do)
     // this will indicate that the proper 'secondary role active' mode can turn on
     if (State.modifierCount > 0) {
+        // detect if any modifier becomes active
+        //
+        // the previous conditions have to be met
+        // or any of the modifiers may pressed long enough
+        for (uint8_t i = 0; i < State.modifierCount; ++i) {
+            if (modifier(i)->keyRef.state->current) {
+                if (secondaryRoleTimeoutElapsed(modifier(i))) {
+                    shouldTriggerSecondaryRoleActivationMode = true;
+                    break;
+                }
+            }
+        }
+
         for (uint8_t i = 0; i < State.actionCount && !shouldTriggerSecondaryRoleActivationMode; ++i) {
             if (!action(i)->keyRef.state->current) {
                 shouldTriggerSecondaryRoleActivationMode = true;
@@ -466,22 +479,9 @@ void handleSecondaryRoleReleaseAwaitState() {
         }
     }
 
-    // detect if any modifier becomes active
-    //
-    // the previous conditions have to be met
-    // or any of the modifiers may pressed long enough
-    bool activatedModifierDetected = false;
-    for (uint8_t i = 0; i < State.modifierCount; ++i) {
-        if (modifier(i)->keyRef.state->current) {
-            if (shouldTriggerSecondaryRoleActivationMode || secondaryRoleTimeoutElapsed(modifier(i))) {
-                activatedModifierDetected = true;
-                break;
-            }
-        }
-    }
 
     // if can activate sec role mode - do it
-    if (activatedModifierDetected) {
+    if (shouldTriggerSecondaryRoleActivationMode) {
         // turn all released pending actions on
         switchToState(2);
         // if there are no modifiers pending anymore - return to simple mode
@@ -529,7 +529,7 @@ void handleActiveSecondaryRoleState() {
         }
     }
 
-    // emit primary roles of the all the modifiers that have been released
+    // emit primary roles of the all the modifiers that have been released (if appropriate)
     for (int i = State.modifierCount - 1; i >= 0; --i) {
         pending_key_t *pendingModifier = modifier(i);
         bool timeoutElapsed = secondaryRoleTimeoutElapsed(pendingModifier);
@@ -542,13 +542,12 @@ void handleActiveSecondaryRoleState() {
         }
     }
 
-    // apply all the pending actions, at this moment none of the actions should be in released state, so remove those
-    // before executing the actions - sort them based on enqueue time(?)
     if (!activeModifierDetected) {
-        State.stateType = State.actionCount > 0 ? 1 : 0;
+        switchToState(0);
     }
 
     executeActions();
+
 }
 
 void addModifiersToReport(int flags) {
@@ -595,8 +594,6 @@ static void updateActiveUsbReports(void)
             if (keyState->current) {
                 updateActiveKey(keyState, slotId, keyId);
             }
-
-            keyState->previous = keyState->current;
         }
     }
 
@@ -624,7 +621,29 @@ static void updateActiveUsbReports(void)
     LedDisplay_SetLayer(State.activeLayer);
 
     processMouseActions();
+
+    if (previousLayer != State.activeLayer) {
+        suppressHeldKeystrokes();
+    }
+
     previousLayer = State.activeLayer;
+    for (uint8_t slotId = 0; slotId < SLOT_COUNT; slotId++) {
+        for (uint8_t keyId = 0; keyId < MAX_KEY_COUNT_PER_MODULE; keyId++) {
+            if (!KeyStates[slotId][keyId].current) {
+                KeyStates[slotId][keyId].suppressed = false;
+            }
+            KeyStates[slotId][keyId].previous = KeyStates[slotId][keyId].current;
+        }
+    }
+}
+
+void suppressHeldKeystrokes() {
+    for (int i = State.actionCount - 1; i >= 0; --i) {
+        pending_key_t *ac = action(i);
+        if (ac->activated && resolveAction(&ac->keyRef)->type == KeyActionType_Keystroke) {
+            ac->keyRef.state->suppressed = true;
+        }
+    }
 }
 
 void UpdateUsbReports(void)
