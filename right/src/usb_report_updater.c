@@ -227,13 +227,12 @@ static void handleSwitchLayerAction(key_state_t *keyState, key_action_t *action)
     }
 
     if (keyState->previous && doubleTapSwitchLayerKey == keyState &&
-        Timer_GetElapsedTime(&doubleTapSwitchLayerTriggerTime) > DoubleTapSwitchLayerReleaseTimeout)
-    {
+            (CurrentTime - doubleTapSwitchLayerTriggerTime) > DoubleTapSwitchLayerReleaseTimeout) {
         ToggledLayer = LayerId_Base;
     }
 
     if (!keyState->previous && previousLayer == LayerId_Base && action->switchLayer.mode == SwitchLayerMode_HoldAndDoubleTapToggle) {
-        if (doubleTapSwitchLayerKey && Timer_GetElapsedTimeAndSetCurrent(&doubleTapSwitchLayerStartTime) < DoubleTapSwitchLayerTimeout) {
+        if (doubleTapSwitchLayerKey && (CurrentTime - doubleTapSwitchLayerStartTime) < DoubleTapSwitchLayerTimeout) {
             ToggledLayer = action->switchLayer.layer;
             isLayerDoubleTapToggled = true;
             doubleTapSwitchLayerTriggerTime = CurrentTime;
@@ -278,13 +277,15 @@ void applyKeyAction(key_state_t *keyState, key_action_t *action) {
             activeMouseStates[action->mouseAction] = true;
             break;
         case KeyActionType_SwitchLayer:
-            // Handled by handleSwitchLayerAction()
             break;
         case KeyActionType_SwitchKeymap:
             SwitchKeymapById(action->switchKeymap.keymapId);
             break;
         case KeyActionType_PlayMacro:
-            Macros_StartMacro(action->playMacro.macroId);
+            if (!keyState->suppressed) {
+                Macros_StartMacro(action->playMacro.macroId);
+                keyState->suppressed = true;
+            }
             break;
     }
 }
@@ -341,8 +342,8 @@ void resetKeyboardReports() {
 
 uint32_t UsbReportUpdateCounter;
 
-
-static const int SEC_ROLE_KICKIN_THRESHOLD = 250;
+static const int SECONDARY_ROLE_ALPHABETIC_KEYS_KICK_IN_THRESHOLD = 250;
+static const int SECONDARY_ROLE_MODIFIER_KEYS_KICK_IN_THRESHOLD = 150;
 
 static bool execModifierActions() {
     int executedModifierActionCount = 0;
@@ -385,7 +386,7 @@ static void executeActions() {
 
     // apply all the pending actions, at this moment none of the actions should be in released state, so remove those
     // before executing the actions - sort them based on enqueue time(?)
-    if (previousLayer != State.activeLayer) {
+    if (previousLayer != State.activeLayer && State.activeLayer == LayerId_Base) {
         suppressHeldKeystrokes();
     }
 
@@ -405,8 +406,10 @@ static void executeActions() {
     }
 }
 
-static bool secondaryRoleTimeoutElapsed(pending_key_t *modifier) {
-    return (CurrentTime - modifier->enqueueTime) > SEC_ROLE_KICKIN_THRESHOLD;
+static bool secondaryRoleTimeoutElapsed(pending_key_t *key) {
+    key_action_t *action = resolveAction(&key->keyRef);
+    bool isModifierOnly = (action->type == SerializedKeyActionType_KeyStroke && action->keystroke.modifiers);
+    return (CurrentTime - key->enqueueTime) > (isModifierOnly ? SECONDARY_ROLE_MODIFIER_KEYS_KICK_IN_THRESHOLD : SECONDARY_ROLE_ALPHABETIC_KEYS_KICK_IN_THRESHOLD);
 }
 
 void handleFreeTypeState() {
@@ -418,7 +421,6 @@ void handleFreeTypeState() {
                 !State.longestPressedKey->activated;
     }
     if (mayStartListeningToSecondaryRoleActivation) {
-        sendDebugChar( HID_KEYBOARD_SC_P);
         switchToState(1);
     } else {
         for (int i = State.modifierCount - 1; i >= 0 ; --i) {
@@ -442,12 +444,10 @@ void handleSecondaryRoleReleaseAwaitState() {
         if (!keyState->current) {
             if (State.modifierCount > 1) {
                 // FIXME - this a workaround which is considered in the state == 2, doing this is roughly equivalent to pushing the mod into the action array
-                sendDebugChar( HID_KEYBOARD_SC_G);
                 State.releasedActionKeyEnqueueTime = pendingModifier->enqueueTime;
                 shouldTriggerSecondaryRoleActivationMode = true;
             } else {
                 if (!secondaryRoleTimeoutElapsed(pendingModifier)) {
-                    sendDebugChar( HID_KEYBOARD_SC_Y);
                     scheduleForImmediateExecution(pendingModifier);
                 }
                 untrackModifier(i);
@@ -488,6 +488,8 @@ void handleSecondaryRoleReleaseAwaitState() {
     } else if (State.modifierCount == 0) {
         executeActions();
         switchToState(0);
+    } else {
+        execModifierActions();
     }
 }
 
@@ -591,6 +593,7 @@ static void updateActiveUsbReports(void)
                 }
             }
 
+
             if (keyState->current) {
                 updateActiveKey(keyState, slotId, keyId);
             }
@@ -598,6 +601,7 @@ static void updateActiveUsbReports(void)
     }
 
     State.activeLayer = GetActiveLayer();
+
     updateLongestPressedKey();
 
     // free mode - none of the modifiers is pressed yet, merely wait for them and push through all the
@@ -622,7 +626,7 @@ static void updateActiveUsbReports(void)
 
     processMouseActions();
 
-    if (previousLayer != State.activeLayer) {
+    if (previousLayer != State.activeLayer && State.activeLayer == LayerId_Base) {
         suppressHeldKeystrokes();
     }
 

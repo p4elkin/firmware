@@ -22,19 +22,14 @@ typedef struct {
     // or as a result of accompanying action key press. This flag set to true means that the primary role of the
     // key should never be emitted anymore.
     bool activated;
-    // modifier refs that were pressed at some point while
-    // a key that might be involved into a sec role thing is pressed (be that a modifier or an action).
-    key_ref_t relatedModifierRefs[4];
-    // count of such actions
-    uint8_t relatedModifierCount;
 
 } pending_key_t;
 
 typedef struct  {
-    pending_key_t modifiers[5];
+    pending_key_t modifiers[3];
     uint8_t modifierCount;
 
-    pending_key_t actions[5];
+    pending_key_t actions[3];
     uint8_t actionCount;
 
     pending_key_t scheduledForImmediateExecution[5];
