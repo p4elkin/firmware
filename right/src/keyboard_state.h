@@ -26,13 +26,13 @@ typedef struct {
 } pending_key_t;
 
 typedef struct  {
-    pending_key_t modifiers[3];
+    pending_key_t modifiers[10];
     uint8_t modifierCount;
 
-    pending_key_t actions[3];
+    pending_key_t actions[10];
     uint8_t actionCount;
 
-    pending_key_t scheduledForImmediateExecution[5];
+    pending_key_t scheduledForImmediateExecution[4];
     uint8_t scheduledForImmediateExecutionAmount;
 
     layer_id_t activeLayer;

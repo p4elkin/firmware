@@ -395,7 +395,7 @@ static void executeActions() {
 
         key_state_t *keyState = actionKey->keyRef.state;
 
-        if (!keyState->suppressed) {
+        if (keyState->current && !keyState->suppressed) {
             applyKeyAction(keyState, resolveAction(&actionKey->keyRef));
             actionKey->activated = true;
         }
