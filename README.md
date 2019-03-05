@@ -1,27 +1,16 @@
 # Ultimate Hacking Keyboard firmware
 
-[![Build Status](https://travis-ci.org/UltimateHackingKeyboard/firmware.svg?branch=master)](https://travis-ci.org/UltimateHackingKeyboard/firmware)
+This repository is a fork of the  of the [Ultimate Hacking Keyboard firmware](https://github.com/UltimateHackingKeyboard/firmware).
 
-This repository hosts the firmware of the [Ultimate Hacking Keyboard](https://ultimatehackingkeyboard.com/).
+The main purpose of this fork is to improve the UHK's secondary key role support, especially in case of applying it to the frequently used keys like alphanumeric, space etc. 
+The crux of the problem is described in [this issue](https://github.com/UltimateHackingKeyboard/firmware/issues/187) (and the referenced ones).
 
-If you want to use the latest firmware version for your UHK, then instead of going through the pain of building the firmware, simply download the [latest release of Agent](https://github.com/UltimateHackingKeyboard/agent/releases/latest) and update to the latest firmware version within Agent with a click of a button.
+In the stock implementation of the feature, the secondary role is triggered as soon as the key with such role is being held and another key is down. The modified algorithm works differently and takes several other aspects into account:
+* the secondary role is triggered by the action keyUp event, not keyDown. This adds a very slight delay to the responsiveness of the secondary role feature, but allows to observe some events that may happen before the action key is up;
+* such events include e.g.: whether secondary role key was pressed when no other 'simple' key was pressed at the same time, whether secondary key was still up when the triggering key was released etc;
+* algorithm also introduces secondary role mode enter timeout (250ms for the alphabetic keys, 150ms - for all the others). If the key held until timeout, keyboard switches it into secondary mode. If such key is released before any other keys are pressed, no action is emitted whatsoever;
+* the algorithm tracks secondary role keys separately from each other, making it possible to e.g. have both ALT and CMD configured as secondary roles for some keys and have them activated at the same time (not possible in stock firmware);
 
-If you're one of the brave few who wants to hack the firmware then read on.
+## Maintenance and further development
 
-1. Make sure to clone this repo with:
-
-`git clone --recursive git@github.com:UltimateHackingKeyboard/firmware.git`
-
-2. Download and install MCUXpresso IDE for [Linux](https://storage.googleapis.com/ugl-static/mcuxpresso-ide/mcuxpressoide-10.2.1_795.x86_64.deb.bin), [Mac](https://storage.googleapis.com/ugl-static/mcuxpresso-ide/MCUXpressoIDE_10.2.1_795.pkg), or [Windows](https://storage.googleapis.com/ugl-static/mcuxpresso-ide/MCUXpressoIDE_10.2.1_795.exe).
-
-3. In the IDE, import the project by invoking *File -> Import -> General -> Existing Projects into Workspace*, select the *left* or *right* directory depending on the desired firmware, then click on the *Finish* button.
-
-4. In order to be able to flash the firmware via USB from the IDE, you must build [Agent](https://github.com/UltimateHackingKeyboard/agent) which is Git submodule of the this repo and located in the `lib/agent` directory.
-
-5. Finally, in the IDE, click on *Run -> External Tools -> External Tools Configurations*, then select a release firmware to be flashed such as *uhk60-right_release_kboot*, and click on the *Run* button.
-
-Going forward, it's easier to flash the firmware of your choice by using the downwards toolbar icon which is located rightwards of the *green play + toolbox icon*.
-
-## Contributing
-
-Want to contribute? Let us show you [how](/CONTRIBUTING.md).
+Being quite happy with the current state of the fork, I do not develop it actively at the moment. However, I would gladly receive any feedback and/or suggestions. Being an extremely happy UHK user, I am intending keeping the state of this firmware up to date with canonical master.
