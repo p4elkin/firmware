@@ -658,7 +658,8 @@ void UpdateUsbReports(void)
         KeyStates[SlotId_RightKeyboardHalf][keyId].current = RightKeyMatrix.keyStates[keyId];
     }
 
-    for (uint8_t keyId = 0; keyId < RIGHT_KEY_MATRIX_KEY_COUNT; keyId++) {
+    uint8_t left_key_count = 7 * 5;
+    for (uint8_t keyId = 0; keyId < left_key_count; keyId++) {
         KeyStates[1][keyId].current = LeftKeyStates[1][keyId].current;
     }
 
