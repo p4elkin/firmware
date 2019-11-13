@@ -658,6 +658,10 @@ void UpdateUsbReports(void)
         KeyStates[SlotId_RightKeyboardHalf][keyId].current = RightKeyMatrix.keyStates[keyId];
     }
 
+    for (uint8_t keyId = 0; keyId < RIGHT_KEY_MATRIX_KEY_COUNT; keyId++) {
+        KeyStates[1][keyId].current = LeftKeyStates[1][keyId].current;
+    }
+
     if (UsbReportUpdateSemaphore && !SleepModeActive) {
         if (Timer_GetElapsedTime(&lastUpdateTime) < USB_SEMAPHORE_TIMEOUT) {
             return;
