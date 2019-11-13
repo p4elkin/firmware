@@ -10,7 +10,7 @@
 // Typedefs:
 
     typedef struct {
-        uint8_t timestamp;
+        uint16_t timestamp;
         bool previous : 1;
         bool current : 1;
         bool debouncing : 1;

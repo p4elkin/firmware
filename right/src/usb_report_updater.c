@@ -378,12 +378,11 @@ static void updateActiveUsbReports(void)
     }
 
     for (uint8_t slotId=0; slotId<SLOT_COUNT; slotId++) {
-        for (uint8_t keyId=0; keyId<MAX_KEY_COUNT_PER_MODULE; keyId++) {
+        for (uint8_t keyId = 0; keyId < MAX_KEY_COUNT_PER_MODULE; keyId++) {
             key_state_t *keyState = &KeyStates[slotId][keyId];
-            key_action_t *action;
 
             if (keyState->debouncing) {
-                if ((uint8_t)(CurrentTime - keyState->timestamp) > (keyState->previous ? DebounceTimePress : DebounceTimeRelease)) {
+                if ((uint16_t) (CurrentTime - keyState->timestamp) > 5000) {
                     keyState->debouncing = false;
                 } else {
                     keyState->current = keyState->previous;
@@ -392,6 +391,13 @@ static void updateActiveUsbReports(void)
                 keyState->timestamp = CurrentTime;
                 keyState->debouncing = true;
             }
+        }
+    }
+
+    for (uint8_t slotId=0; slotId<SLOT_COUNT; slotId++) {
+        for (uint8_t keyId=0; keyId<MAX_KEY_COUNT_PER_MODULE; keyId++) {
+            key_state_t *keyState = &KeyStates[slotId][keyId];
+            key_action_t *action;
 
             if (keyState->current && !keyState->previous) {
                 if (SleepModeActive) {
